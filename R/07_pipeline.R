@@ -78,8 +78,8 @@ bluster <- function(bcr_data,
   .validate_bcr_data(bcr_data)
 
   message("╔══════════════════════════════════════════════════════════╗")
-  message("║            blusteR — B-cell Interaction by                ║")
-  message("║                Paratope Hotspots v1.0                   ║")
+  message("║            blusteR — B-cell Interaction by               ║")
+  message("║                Paratope Hotspots v1.0                    ║")
   message("╚══════════════════════════════════════════════════════════╝")
   message("")
 
