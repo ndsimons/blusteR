@@ -17,6 +17,7 @@ export(download_oas_reference)
 export(download_iedb_bcell)
 export(download_sabdab)
 export(build_reference)
+export(load_reference)
 
 # Enrichment & scoring
 export(score_clusters)

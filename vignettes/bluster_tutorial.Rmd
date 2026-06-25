@@ -146,8 +146,8 @@ result <- bluster(
 ### Step-by-step control
 
 ```{r steps}
-# 1. Build reference
-ref <- build_reference(species = "human")
+# 1. Load the pre-built reference
+ref <- load_reference(species = "human")
 
 # 2. Filter
 bcr_filt <- filter_bcr(bcr_all, min_cdr3_len = 5, max_cdr3_len = 30)

@@ -183,6 +183,10 @@ download_sabdab <- function(dest_dir = NULL, force = FALSE) {
 #' @param iedb_path Path to IEDB B-cell epitope RDS.
 #' @param sabdab_path Path to SAbDab RDS.
 #' @param species Species for OAS if downloading is needed.
+#' @param n_cores Number of CPU cores to use when precomputing background
+#'   k-mer frequencies.  Defaults to \code{getOption("bluster.ncores", 1)}.
+#'   Set to a value > 1 (e.g. \code{parallel::detectCores()}) to parallelise
+#'   the slow per-sequence k-mer frequency step.
 #'
 #' @return A list of class \code{bluster_reference} containing:
 #'   \code{$oas} (background CDR3s), \code{$iedb} (epitope data),
@@ -193,7 +197,8 @@ download_sabdab <- function(dest_dir = NULL, force = FALSE) {
 build_reference <- function(oas_path = NULL,
                             iedb_path = NULL,
                             sabdab_path = NULL,
-                            species = "human") {
+                            species = "human",
+                            n_cores = getOption("bluster.ncores", 1L)) {
 
   # Download anything missing
   if (is.null(oas_path)) oas_path <- download_oas_reference(species = species)
@@ -205,9 +210,12 @@ build_reference <- function(oas_path = NULL,
   sabdab <- readRDS(sabdab_path)
 
   # Precompute k-mer frequencies from OAS background
-  message("[blusteR] Precomputing background k-mer frequencies...")
+  n_cores <- .resolve_ncores(n_cores)
+  message("[blusteR] Precomputing background k-mer frequencies",
+          if (n_cores > 1L) paste0(" (", n_cores, " cores)") else "", "...")
   kmer_freq <- .compute_kmer_frequencies(oas$cdr3_aa,
-                                         k_sizes = .DEFAULT_KMER_SIZES)
+                                         k_sizes = .DEFAULT_KMER_SIZES,
+                                         n_cores = n_cores)
 
   ref <- list(
     oas       = oas,
@@ -219,6 +227,49 @@ build_reference <- function(oas_path = NULL,
   class(ref) <- "bluster_reference"
 
   message("[blusteR] Reference built successfully.")
+  ref
+}
+
+
+#' Load the pre-built blusteR reference object
+#'
+#' Loads the pre-computed \code{bluster_reference} object bundled with the
+#' package in \code{inst/extdata}.  These objects (OAS background, IEDB
+#' epitopes, SAbDab structures, and the pre-computed background k-mer
+#' frequency tables) are produced by \code{data-raw/build_references.R}.
+#'
+#' Using the bundled reference avoids re-downloading the source databases
+#' and re-computing the slow background k-mer frequencies on every run.
+#'
+#' @param species One of \code{"human"} (default) or \code{"mouse"}.
+#'
+#' @return A list of class \code{bluster_reference}.
+#' @export
+load_reference <- function(species = c("human", "mouse")) {
+
+  species <- match.arg(species)
+
+  rds_path <- system.file(
+    "extdata",
+    paste0("bluster_reference_", species, ".rds"),
+    package = "blusteR"
+  )
+
+  if (!nzchar(rds_path) || !file.exists(rds_path)) {
+    stop("Pre-built reference for species '", species, "' not found. ",
+         "Expected a bundled file at inst/extdata/bluster_reference_",
+         species, ".rds. Rebuild it with data-raw/build_references.R ",
+         "or call build_reference() to construct one at run time.",
+         call. = FALSE)
+  }
+
+  message("[blusteR] Loading pre-built reference: ", rds_path)
+  ref <- readRDS(rds_path)
+
+  if (!inherits(ref, "bluster_reference")) {
+    class(ref) <- "bluster_reference"
+  }
+
   ref
 }
 
@@ -538,8 +589,17 @@ build_reference <- function(oas_path = NULL,
 
 
 #' Compute k-mer frequencies from a vector of CDR3 sequences
+#'
+#' The per-sequence frequency step (fraction of background sequences
+#' containing each k-mer) is the bottleneck: it scans every reference
+#' sequence once per unique k-mer.  When \code{n_cores > 1} this scan is
+#' split across CPU cores (forked workers on Unix via
+#' \code{parallel::mclapply}, a PSOCK cluster on Windows).
 #' @keywords internal
-.compute_kmer_frequencies <- function(cdr3_vec, k_sizes = c(4L, 5L)) {
+.compute_kmer_frequencies <- function(cdr3_vec, k_sizes = c(4L, 5L),
+                                      n_cores = getOption("bluster.ncores", 1L)) {
+
+  n_cores <- .resolve_ncores(n_cores)
 
   result <- list()
   cdr3_vec <- cdr3_vec[!is.na(cdr3_vec) & nchar(cdr3_vec) >= max(k_sizes)]
@@ -557,11 +617,11 @@ build_reference <- function(oas_path = NULL,
     freq <- as.numeric(tab) / sum(tab)
     names(freq) <- names(tab)
 
-    # Also compute per-sequence frequency (fraction of sequences containing
-    # each k-mer) for enrichment testing
-    per_seq <- vapply(names(tab), function(km) {
-      sum(grepl(km, cdr3_vec, fixed = TRUE)) / n_total
-    }, numeric(1))
+    # Per-sequence frequency (fraction of sequences containing each k-mer)
+    # for enrichment testing, parallelised across unique k-mers.
+    kmers <- names(tab)
+    per_seq <- .parallel_kmer_counts(kmers, cdr3_vec, n_cores) / n_total
+    names(per_seq) <- kmers
 
     result[[as.character(k)]] <- list(
       count    = tab,
@@ -572,4 +632,55 @@ build_reference <- function(oas_path = NULL,
   }
 
   result
+}
+
+
+#' Normalise a requested core count against the machine's capacity
+#' @keywords internal
+.resolve_ncores <- function(n_cores) {
+  if (is.null(n_cores) || length(n_cores) == 0L ||
+      is.na(n_cores[1]) || n_cores[1] < 1L) {
+    return(1L)
+  }
+  max_cores <- tryCatch(parallel::detectCores(), error = function(e) 1L)
+  if (is.na(max_cores) || max_cores < 1L) max_cores <- 1L
+  as.integer(min(as.integer(n_cores[1]), max_cores))
+}
+
+
+#' Count, for each k-mer, how many sequences contain it (optionally parallel)
+#'
+#' Returns an integer-like numeric vector aligned to \code{kmers}.
+#' @keywords internal
+.parallel_kmer_counts <- function(kmers, cdr3_vec, n_cores = 1L) {
+
+  count_chunk <- function(km_chunk) {
+    vapply(km_chunk, function(km) {
+      sum(grepl(km, cdr3_vec, fixed = TRUE))
+    }, numeric(1))
+  }
+
+  if (n_cores <= 1L || length(kmers) < 2L) {
+    return(count_chunk(kmers))
+  }
+
+  # Contiguous chunks preserve the original k-mer order on reassembly.
+  chunk_id <- cut(seq_along(kmers), n_cores, labels = FALSE)
+  chunks   <- split(kmers, chunk_id)
+
+  if (.Platform$OS.type == "windows") {
+    cl <- parallel::makeCluster(n_cores)
+    on.exit(parallel::stopCluster(cl), add = TRUE)
+    parallel::clusterExport(cl, "cdr3_vec", envir = environment())
+    parts <- parallel::parLapply(cl, chunks, count_chunk)
+  } else {
+    parts <- parallel::mclapply(chunks, count_chunk, mc.cores = n_cores)
+    failed <- vapply(parts, inherits, logical(1), what = "try-error")
+    if (any(failed)) {
+      stop("parallel k-mer counting failed: ",
+           conditionMessage(attr(parts[[which(failed)[1]]], "condition")))
+    }
+  }
+
+  unlist(parts, use.names = FALSE)
 }

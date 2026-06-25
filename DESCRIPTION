@@ -27,6 +27,7 @@ Imports:
     ggplot2,
     igraph,
     methods,
+    parallel,
     stats,
     utils
 Suggests:

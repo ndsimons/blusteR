@@ -8,7 +8,8 @@
 #'   of \code{load_10x_bcr()}, \code{load_screpertoire()}, or
 #'   \code{load_airr()}).
 #' @param reference A \code{bluster_reference} object.  If \code{NULL},
-#'   one is built automatically.
+#'   the pre-built reference bundled with the package is loaded via
+#'   \code{load_reference()}.
 #' @param chain Which chain to analyse: \code{"heavy"} (default),
 #'   \code{"light"}, \code{"both"}, or \code{"paired"}.
 #' @param k_sizes K-mer lengths for motif discovery (default
@@ -85,8 +86,8 @@ bluster <- function(bcr_data,
 
   # --- Step 0: Build reference ------------------------------------------
   if (is.null(reference)) {
-    message("── Step 0: Building reference databases ─────────────────")
-    reference <- build_reference(species = species)
+    message("── Step 0: Loading reference databases ──────────────────")
+    reference <- load_reference(species = species)
     message("")
   }
 
