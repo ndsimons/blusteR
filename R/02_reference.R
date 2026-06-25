@@ -98,24 +98,10 @@ download_iedb_bcell <- function(dest_dir = NULL,
   }
 
   message("[blusteR] Downloading IEDB B-cell epitope data...")
-
-  # Query IEDB API for B-cell epitopes with antibody info
-  base_url <- "https://query-api.iedb.org/bcell_search"
-  params <- list(
-    output_format = "json",
-    bcell_type    = "Positive"
-  )
-  if (!is.null(organism)) params$organism <- organism
+  message("        Querying IEDB Query API (https://query-api.iedb.org/)...")
 
   epitopes <- tryCatch({
-    resp <- httr::GET(base_url, query = params, httr::timeout(120))
-    if (httr::status_code(resp) == 200) {
-      raw <- jsonlite::fromJSON(httr::content(resp, "text", encoding = "UTF-8"),
-                                flatten = TRUE)
-      .parse_iedb_bcell(raw)
-    } else {
-      stop("IEDB returned status ", httr::status_code(resp))
-    }
+    .download_iedb_api(organism)
   }, error = function(e) {
     message("[blusteR] IEDB API unavailable: ", conditionMessage(e))
     message("        Creating template epitope database...")
@@ -239,41 +225,107 @@ build_reference <- function(oas_path = NULL,
 
 # ---- internal helpers for reference databases -------------------------
 
-#' Download sequences from OAS API
+#' Download sequences from OAS
+#'
+#' OAS does not expose a JSON REST API.  The unpaired-sequence search form
+#' (a POST request) returns an HTML page that embeds a bulk-download shell
+#' script of \code{wget <data-unit>.csv.gz} commands.  We submit the
+#' attribute search, scrape those data-unit URLs, then download and parse
+#' the gzipped CSV data units until enough sequences are collected.
 #' @keywords internal
 .download_oas_api <- function(species, n_sequences) {
 
-  # OAS bulk data endpoint
-  base_url <- "http://opig.stats.ox.ac.uk/webapps/oas/oas_unpaired/"
-  params <- list(
-    species = species,
-    chain   = "Heavy",
-    output  = "json"
+  search_url <- "https://opig.stats.ox.ac.uk/webapps/oas/oas_unpaired/"
+
+  resp <- httr::POST(
+    search_url,
+    body   = list(Species = species, Chain = "Heavy"),
+    encode = "multipart",
+    httr::timeout(300)
   )
-
-  resp <- httr::GET(base_url, query = params, httr::timeout(300))
-
   if (httr::status_code(resp) != 200) {
-    stop("OAS API request failed with status ", httr::status_code(resp))
+    stop("OAS search request failed with status ", httr::status_code(resp))
   }
 
-  raw <- jsonlite::fromJSON(httr::content(resp, "text", encoding = "UTF-8"),
-                            flatten = TRUE)
+  html <- httr::content(resp, "text", encoding = "UTF-8")
 
-  # Extract CDR3 sequences and V-gene annotations
-  dt <- data.table::data.table(
-    cdr3_aa = raw$cdr3_aa,
-    v_gene  = raw$v_gene,
-    j_gene  = raw$j_gene,
-    chain   = "IGH"
-  )
+  # Pull the gzipped data-unit URLs out of the embedded download script
+  unit_urls <- regmatches(
+    html,
+    gregexpr("https?://[^\"'[:space:]]+\\.csv\\.gz", html, perl = TRUE)
+  )[[1]]
+  unit_urls <- unique(unit_urls)
 
-  # Subsample if needed
+  if (length(unit_urls) == 0) {
+    stop("OAS search returned no data units for species '", species, "'")
+  }
+
+  # Shuffle so we sample across studies rather than always the first ones
+  unit_urls <- sample(unit_urls)
+
+  parts  <- list()
+  n_have <- 0L
+  for (url in unit_urls) {
+    part <- tryCatch(.download_oas_unit(url), error = function(e) NULL)
+    if (is.null(part) || nrow(part) == 0) next
+    parts[[length(parts) + 1L]] <- part
+    n_have <- n_have + nrow(part)
+    if (n_have >= n_sequences) break
+  }
+
+  if (length(parts) == 0) {
+    stop("failed to download any OAS data units")
+  }
+
+  dt <- data.table::rbindlist(parts, use.names = TRUE, fill = TRUE)
+
+  # Keep only valid amino-acid CDR3 sequences
+  dt <- dt[!is.na(dt$cdr3_aa) & nzchar(dt$cdr3_aa) &
+             grepl("^[ACDEFGHIKLMNPQRSTVWY]+$", dt$cdr3_aa)]
+
   if (nrow(dt) > n_sequences) {
     dt <- dt[sample(.N, n_sequences)]
   }
 
-  dt
+  dt[]
+}
+
+
+#' Download and parse a single OAS data unit (gzipped CSV)
+#'
+#' Each OAS data unit is a gzipped CSV whose first line is a metadata JSON
+#' object and whose second line is the real column header.  The relevant
+#' columns are \code{cdr3_aa}, \code{v_call}, \code{j_call} and \code{locus}.
+#' @keywords internal
+.download_oas_unit <- function(url, max_lines = 100000L) {
+
+  resp <- httr::GET(url, httr::timeout(300))
+  if (httr::status_code(resp) != 200) {
+    stop("OAS data unit download failed: ", url)
+  }
+
+  tmp <- tempfile(fileext = ".csv.gz")
+  on.exit(unlink(tmp), add = TRUE)
+  writeBin(httr::content(resp, "raw"), tmp)
+
+  con <- gzfile(tmp, "rt")
+  # Skip the metadata line, then read up to max_lines of CSV (header + rows)
+  lines <- readLines(con, n = max_lines + 1L)
+  close(con)
+  if (length(lines) < 3) return(NULL)
+
+  dt <- data.table::fread(
+    text             = paste(lines[-1], collapse = "\n"),
+    stringsAsFactors = FALSE,
+    showProgress     = FALSE
+  )
+
+  data.table::data.table(
+    cdr3_aa = if ("cdr3_aa" %in% names(dt)) dt$cdr3_aa else NA_character_,
+    v_gene  = if ("v_call"  %in% names(dt)) dt$v_call  else NA_character_,
+    j_gene  = if ("j_call"  %in% names(dt)) dt$j_call  else NA_character_,
+    chain   = "IGH"
+  )
 }
 
 
@@ -326,26 +378,98 @@ build_reference <- function(oas_path = NULL,
 }
 
 
+#' Query the IEDB Query API (IQ-API) for positive B-cell epitopes
+#'
+#' The IQ-API is a PostgREST service, so filters use PostgREST operators
+#' (e.g. \code{qualitative_measure=eq.Positive}).  Results are paged at a
+#' maximum of 10,000 records per request; we page with \code{offset} up to
+#' \code{max_records}.
+#' @keywords internal
+.download_iedb_api <- function(organism = NULL, max_records = 50000L) {
+
+  base_url <- "https://query-api.iedb.org/bcell_search"
+
+  select_cols <- paste(
+    c("linear_sequence", "parent_source_antigen_name",
+      "source_organism_name", "receptor_chain1_cdr3_seqs",
+      "receptor_chain2_cdr3_seqs", "pdb_id", "assay_names"),
+    collapse = ","
+  )
+
+  page_size <- 10000L
+  offset    <- 0L
+  pages     <- list()
+
+  repeat {
+    query <- list(
+      qualitative_measure = "eq.Positive",
+      structure_type      = "eq.Linear peptide",
+      select              = select_cols,
+      order               = "structure_id",
+      limit               = page_size,
+      offset              = offset
+    )
+    if (!is.null(organism)) {
+      query$source_organism_name <- paste0("ilike.*", organism, "*")
+    }
+
+    resp <- httr::GET(base_url, query = query, httr::timeout(120))
+    if (httr::status_code(resp) != 200) {
+      stop("IEDB returned status ", httr::status_code(resp))
+    }
+
+    raw <- jsonlite::fromJSON(
+      httr::content(resp, "text", encoding = "UTF-8"),
+      flatten = TRUE
+    )
+    if (length(raw) == 0 || NROW(raw) == 0) break
+
+    pages[[length(pages) + 1L]] <- data.table::as.data.table(raw)
+    offset <- offset + page_size
+    if (offset >= max_records) break
+  }
+
+  if (length(pages) == 0) {
+    stop("IEDB returned no B-cell epitope records")
+  }
+
+  .parse_iedb_bcell(data.table::rbindlist(pages, use.names = TRUE, fill = TRUE))
+}
+
+
 #' Parse IEDB B-cell response into standardised table
 #' @keywords internal
 .parse_iedb_bcell <- function(raw) {
 
   dt <- data.table::as.data.table(raw)
 
-  # Standardise column names
-  cols_want <- c("epitope_linear_sequence", "antigen_name",
-                 "organism_name", "antibody_heavy_chain_cdr3",
-                 "antibody_light_chain_cdr3", "assay_type",
-                 "pdb_id")
-  cols_have <- intersect(cols_want, names(dt))
+  if (nrow(dt) == 0) return(.create_template_iedb())
 
-  out <- dt[, ..cols_have]
-  data.table::setnames(out, old = cols_have, new = c(
-    "epitope_seq", "antigen", "organism", "cdr3h",
-    "cdr3l", "assay", "pdb_id"
-  )[seq_along(cols_have)])
+  # Receptor CDR3 fields are arrays (list-columns); collapse to a string
+  collapse_seq <- function(x) {
+    if (is.null(x)) return(rep(NA_character_, nrow(dt)))
+    vapply(x, function(v) {
+      v <- unlist(v)
+      if (length(v) == 0 || all(is.na(v))) NA_character_
+      else paste(v[!is.na(v)], collapse = ";")
+    }, character(1))
+  }
 
-  out
+  pick <- function(name) {
+    if (name %in% names(dt)) as.character(dt[[name]]) else NA_character_
+  }
+
+  data.table::data.table(
+    epitope_seq = pick("linear_sequence"),
+    antigen     = pick("parent_source_antigen_name"),
+    organism    = pick("source_organism_name"),
+    cdr3h       = collapse_seq(if ("receptor_chain1_cdr3_seqs" %in% names(dt))
+                                 dt[["receptor_chain1_cdr3_seqs"]] else NULL),
+    cdr3l       = collapse_seq(if ("receptor_chain2_cdr3_seqs" %in% names(dt))
+                                 dt[["receptor_chain2_cdr3_seqs"]] else NULL),
+    assay       = pick("assay_names"),
+    pdb_id      = pick("pdb_id")
+  )
 }
 
 
