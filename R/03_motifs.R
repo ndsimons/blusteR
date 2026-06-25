@@ -22,6 +22,9 @@
 #'   in (default 0.20).  Motifs found in more than this fraction are
 #'   germline/framework-common rather than specificity signals and are
 #'   dropped to avoid merging unrelated cells into one giant cluster.
+#' @param min_fold Minimum observed/background fold enrichment for a motif
+#'   to be retained (default 10).  Filters weakly-enriched motifs that are
+#'   statistically significant only because of large input size.
 #' @param p_cutoff Adjusted p-value threshold (default 0.05).
 #' @param shm_degenerate Logical; also test degenerate motifs with one
 #'   position masked to its physico-chemical group (default TRUE).
@@ -37,6 +40,7 @@ bluster_motifs <- function(bcr_data,
                          k_sizes = .DEFAULT_KMER_SIZES,
                          min_freq = .DEFAULT_LOCAL_MIN_FREQ,
                          max_freq = .DEFAULT_LOCAL_MAX_FREQ,
+                         min_fold = .DEFAULT_MIN_FOLD,
                          p_cutoff = .DEFAULT_PVALUE,
                          shm_degenerate = TRUE,
                          p_adjust_method = "BH") {
@@ -150,8 +154,8 @@ bluster_motifs <- function(bcr_data,
   # Multiple-testing correction across all motifs
   out[, pvalue_adj := p.adjust(pvalue, method = p_adjust_method)]
 
-  # Filter to significant
-  out <- out[pvalue_adj < p_cutoff]
+  # Filter to significant AND substantially enriched motifs
+  out <- out[pvalue_adj < p_cutoff & fold_enrichment >= min_fold]
 
   # Sort by enrichment
   data.table::setorder(out, pvalue_adj)

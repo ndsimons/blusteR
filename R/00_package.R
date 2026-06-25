@@ -46,6 +46,10 @@
 # promiscuous motifs are germline/framework-common rather than specificity
 # signals, and would otherwise merge most cells into one giant cluster.
 .DEFAULT_LOCAL_MAX_FREQ <- 0.20
+# Minimum observed/background fold enrichment for a motif to be kept.
+# A large input n makes weakly-enriched motifs statistically significant;
+# requiring real fold enrichment removes those spurious bridging motifs.
+.DEFAULT_MIN_FOLD <- 10
 .DEFAULT_PVALUE <- 0.05
 
 #' Lazily load BLOSUM62 matrix
