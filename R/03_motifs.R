@@ -18,6 +18,10 @@
 #' @param k_sizes Integer vector of k-mer lengths (default \code{c(4, 5)}).
 #' @param min_freq Minimum number of input sequences that must contain a
 #'   motif for it to be tested (default 3).
+#' @param max_freq Maximum fraction of input sequences a motif may appear
+#'   in (default 0.20).  Motifs found in more than this fraction are
+#'   germline/framework-common rather than specificity signals and are
+#'   dropped to avoid merging unrelated cells into one giant cluster.
 #' @param p_cutoff Adjusted p-value threshold (default 0.05).
 #' @param shm_degenerate Logical; also test degenerate motifs with one
 #'   position masked to its physico-chemical group (default TRUE).
@@ -32,6 +36,7 @@ bluster_motifs <- function(bcr_data,
                          chain = c("heavy", "light", "both"),
                          k_sizes = .DEFAULT_KMER_SIZES,
                          min_freq = .DEFAULT_LOCAL_MIN_FREQ,
+                         max_freq = .DEFAULT_LOCAL_MAX_FREQ,
                          p_cutoff = .DEFAULT_PVALUE,
                          shm_degenerate = TRUE,
                          p_adjust_method = "BH") {
@@ -74,8 +79,10 @@ bluster_motifs <- function(bcr_data,
       kmer_map <- .extract_kmers_per_seq(seqs$cdr3, k)
       kmer_counts <- table(unlist(kmer_map))
 
-      # Filter to minimum frequency
-      candidates <- names(kmer_counts)[kmer_counts >= min_freq]
+      # Filter to minimum frequency, and drop promiscuous (too-common) motifs
+      max_count <- max_freq * nrow(seqs)
+      candidates <- names(kmer_counts)[kmer_counts >= min_freq &
+                                       kmer_counts <= max_count]
 
       if (length(candidates) == 0) next
 
@@ -108,7 +115,8 @@ bluster_motifs <- function(bcr_data,
         if (length(degen_motifs) > 0) {
           degen_map <- .extract_degenerate_kmers_per_seq(seqs$cdr3, degen_motifs)
           degen_counts <- .count_degenerate_motifs(degen_motifs, degen_map)
-          degen_cands <- names(degen_counts)[degen_counts >= min_freq]
+          degen_cands <- names(degen_counts)[degen_counts >= min_freq &
+                                             degen_counts <= max_count]
           if (length(degen_cands) > 0) {
             degen_results <- .test_degenerate_enrichment(
               candidates  = degen_cands,
@@ -314,9 +322,13 @@ bluster_motifs <- function(bcr_data,
     n_obs <- sum(has_motif)
     freq_obs <- n_obs / n_input
 
-    # For degenerate motifs, estimate background frequency as the average
-    # of constituent exact motifs
-    freq_ref <- 1 / bg$n_total  # conservative default
+    # Real background: fraction of background sequences whose exact k-mers
+    # match this degenerate pattern (summed over matching exact k-mers,
+    # capped < 1, with a pseudocount floor).
+    matching <- grepl(motif, names(bg$per_seq))
+    freq_ref <- sum(bg$per_seq[matching])
+    if (!is.finite(freq_ref) || freq_ref <= 0) freq_ref <- 1 / bg$n_total
+    freq_ref <- min(freq_ref, 0.99)
 
     pval <- stats::binom.test(
       x = n_obs, n = n_input, p = max(freq_ref, 1e-10),

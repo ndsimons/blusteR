@@ -15,6 +15,8 @@
 #' @param k_sizes K-mer lengths for motif discovery (default
 #'   \code{c(4, 5)}).
 #' @param motif_min_freq Minimum motif frequency (default 3).
+#' @param motif_max_freq Maximum fraction of input sequences a motif may
+#'   appear in (default 0.20); more common motifs are dropped.
 #' @param motif_p_cutoff Adjusted p-value threshold for motifs
 #'   (default 0.05).
 #' @param global_max_dist Maximum global CDR3 distance (default 2).
@@ -55,6 +57,7 @@ bluster <- function(bcr_data,
                   chain = c("heavy", "light", "both", "paired"),
                   k_sizes = .DEFAULT_KMER_SIZES,
                   motif_min_freq = .DEFAULT_LOCAL_MIN_FREQ,
+                  motif_max_freq = .DEFAULT_LOCAL_MAX_FREQ,
                   motif_p_cutoff = .DEFAULT_PVALUE,
                   global_max_dist = .DEFAULT_GLOBAL_DIST,
                   global_scoring = c("blosum", "hamming"),
@@ -105,6 +108,7 @@ bluster <- function(bcr_data,
     chain        = motif_chain,
     k_sizes      = k_sizes,
     min_freq     = motif_min_freq,
+    max_freq     = motif_max_freq,
     p_cutoff     = motif_p_cutoff
   )
   message("")

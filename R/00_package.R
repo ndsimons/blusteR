@@ -42,6 +42,10 @@
 # Default distance thresholds
 .DEFAULT_GLOBAL_DIST <- 2L
 .DEFAULT_LOCAL_MIN_FREQ <- 3L
+# Drop motifs present in more than this fraction of input sequences: such
+# promiscuous motifs are germline/framework-common rather than specificity
+# signals, and would otherwise merge most cells into one giant cluster.
+.DEFAULT_LOCAL_MAX_FREQ <- 0.20
 .DEFAULT_PVALUE <- 0.05
 
 #' Lazily load BLOSUM62 matrix
