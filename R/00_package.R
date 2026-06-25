@@ -24,8 +24,8 @@
 
 .blusteR_ENV <- new.env(parent = emptyenv())
 
-# BLOSUM62 substitution scores for SHM-aware comparison
-.BLOSUM62 <- NULL  # lazily loaded
+# BLOSUM62 substitution scores for SHM-aware comparison are lazily built
+# and cached in .blusteR_ENV$BLOSUM62 (see .get_blosum62()).
 
 # Amino acid properties for CDR3 physico-chemical grouping
 .AA_GROUPS <- list(
@@ -48,7 +48,7 @@
 #' @keywords internal
 .get_blosum62 <- function() {
 
-  if (is.null(.BLOSUM62)) {
+  if (is.null(.blusteR_ENV$BLOSUM62)) {
     aa <- c("A","R","N","D","C","Q","E","G","H","I",
             "L","K","M","F","P","S","T","W","Y","V")
     # Standard BLOSUM62 upper triangle, symmetric
@@ -75,7 +75,7 @@
        0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4
     )
     m <- matrix(raw, nrow = 20, ncol = 20, dimnames = list(aa, aa))
-    assign(".BLOSUM62", m, envir = parent.env(environment()))
+    assign("BLOSUM62", m, envir = .blusteR_ENV)
   }
-  .BLOSUM62
+  .blusteR_ENV$BLOSUM62
 }
