@@ -162,6 +162,34 @@ bluster <- function(bcr_data,
 }
 
 
+#' Create a pipeline progress bar
+#'
+#' Returns a base-R text progress bar tracking overall pipeline step
+#' completion, or \code{NULL} when \code{verbose} is \code{FALSE}.
+#' @keywords internal
+.bluster_progress_new <- function(total, verbose = TRUE) {
+  if (!isTRUE(verbose) || total < 1L) return(NULL)
+  utils::txtProgressBar(min = 0, max = total, initial = 0, style = 3)
+}
+
+#' Advance a pipeline progress bar by one step
+#'
+#' @return The new (incremented) step count.
+#' @keywords internal
+.bluster_progress_tick <- function(pb, step_i) {
+  step_i <- step_i + 1L
+  if (!is.null(pb)) utils::setTxtProgressBar(pb, step_i)
+  step_i
+}
+
+#' Close a pipeline progress bar
+#' @keywords internal
+.bluster_progress_close <- function(pb) {
+  if (!is.null(pb)) close(pb)
+  invisible(NULL)
+}
+
+
 #' Validate blusteR standard-format BCR data
 #' @keywords internal
 .validate_bcr_data <- function(dt) {

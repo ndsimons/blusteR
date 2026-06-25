@@ -175,6 +175,10 @@ bluster_motifs <- function(bcr_data,
 
   results <- vector("list", length(candidates))
 
+  pb <- .bluster_progress_new(length(candidates),
+                              getOption("bluster.verbose", TRUE))
+  pb_i <- 0L
+
   for (i in seq_along(candidates)) {
     motif <- candidates[i]
 
@@ -209,7 +213,11 @@ bluster_motifs <- function(bcr_data,
       pvalue_adj      = NA_real_,  # filled later
       member_ids      = list(seq_ids[has_motif])
     )
+
+    pb_i <- .bluster_progress_tick(pb, pb_i)
   }
+
+  .bluster_progress_close(pb)
 
   data.table::rbindlist(results)
 }
