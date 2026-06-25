@@ -107,9 +107,7 @@ bluster_motifs <- function(bcr_data,
         degen_motifs <- .generate_degenerate_motifs(candidates, k)
         if (length(degen_motifs) > 0) {
           degen_map <- .extract_degenerate_kmers_per_seq(seqs$cdr3, degen_motifs)
-          degen_counts <- vapply(degen_motifs, function(dm) {
-            sum(vapply(degen_map, function(x) dm %in% x, logical(1)))
-          }, integer(1))
+          degen_counts <- .count_degenerate_motifs(degen_motifs, degen_map)
           degen_cands <- names(degen_counts)[degen_counts >= min_freq]
           if (length(degen_cands) > 0) {
             degen_results <- .test_degenerate_enrichment(
@@ -176,7 +174,10 @@ bluster_motifs <- function(bcr_data,
   results <- vector("list", length(candidates))
 
   pb <- .bluster_progress_new(length(candidates),
-                              getOption("bluster.verbose", TRUE))
+                              getOption("bluster.verbose", TRUE),
+                              label = sprintf(
+                                "[blusteR] Testing %d exact k=%d motifs (%s)...",
+                                length(candidates), k, chain_label))
   pb_i <- 0L
 
   for (i in seq_along(candidates)) {
@@ -256,12 +257,42 @@ bluster_motifs <- function(bcr_data,
 #' @keywords internal
 .extract_degenerate_kmers_per_seq <- function(cdr3_vec, degen_motifs) {
 
-  lapply(cdr3_vec, function(s) {
+  pb <- .bluster_progress_new(
+    length(cdr3_vec), getOption("bluster.verbose", TRUE),
+    label = sprintf("[blusteR] Scanning %d sequences for %d degenerate motifs...",
+                    length(cdr3_vec), length(degen_motifs)))
+  pb_i <- 0L
+
+  out <- lapply(cdr3_vec, function(s) {
     matches <- vapply(degen_motifs, function(dm) {
       grepl(dm, s)
     }, logical(1))
+    pb_i <<- .bluster_progress_tick(pb, pb_i)
     degen_motifs[matches]
   })
+
+  .bluster_progress_close(pb)
+  out
+}
+
+#' Count input sequences matching each degenerate motif
+#' @keywords internal
+.count_degenerate_motifs <- function(degen_motifs, degen_map) {
+
+  pb <- .bluster_progress_new(
+    length(degen_motifs), getOption("bluster.verbose", TRUE),
+    label = sprintf("[blusteR] Counting matches for %d degenerate motifs...",
+                    length(degen_motifs)))
+  pb_i <- 0L
+
+  counts <- vapply(degen_motifs, function(dm) {
+    n <- sum(vapply(degen_map, function(x) dm %in% x, logical(1)))
+    pb_i <<- .bluster_progress_tick(pb, pb_i)
+    n
+  }, integer(1))
+
+  .bluster_progress_close(pb)
+  counts
 }
 
 #' Test degenerate motif enrichment
@@ -270,6 +301,12 @@ bluster_motifs <- function(bcr_data,
                                         bg, n_input, k, chain_label) {
 
   results <- vector("list", length(candidates))
+
+  pb <- .bluster_progress_new(
+    length(candidates), getOption("bluster.verbose", TRUE),
+    label = sprintf("[blusteR] Testing %d degenerate k=%d motifs (%s)...",
+                    length(candidates), k, chain_label))
+  pb_i <- 0L
 
   for (i in seq_along(candidates)) {
     motif <- candidates[i]
@@ -300,7 +337,11 @@ bluster_motifs <- function(bcr_data,
       pvalue_adj      = NA_real_,
       member_ids      = list(seq_ids[has_motif])
     )
+
+    pb_i <- .bluster_progress_tick(pb, pb_i)
   }
+
+  .bluster_progress_close(pb)
 
   data.table::rbindlist(results)
 }

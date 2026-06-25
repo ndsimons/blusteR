@@ -164,11 +164,14 @@ bluster <- function(bcr_data,
 
 #' Create a pipeline progress bar
 #'
-#' Returns a base-R text progress bar tracking overall pipeline step
-#' completion, or \code{NULL} when \code{verbose} is \code{FALSE}.
+#' Returns a base-R text progress bar tracking progress over \code{total}
+#' iterations, or \code{NULL} when \code{verbose} is \code{FALSE}.  An
+#' optional \code{label} is printed on its own line before the bar so the
+#' user can tell which section is running.
 #' @keywords internal
-.bluster_progress_new <- function(total, verbose = TRUE) {
+.bluster_progress_new <- function(total, verbose = TRUE, label = NULL) {
   if (!isTRUE(verbose) || total < 1L) return(NULL)
+  if (!is.null(label)) message(label)
   utils::txtProgressBar(min = 0, max = total, initial = 0, style = 3)
 }
 
