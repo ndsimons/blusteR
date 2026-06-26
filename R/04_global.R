@@ -25,6 +25,9 @@
 #'   distance, or \code{"hamming"} for unweighted.
 #' @param subsample If the number of unique CDR3 sequences exceeds this
 #'   value, subsample to reduce computation (default 10000).
+#' @param n_cores Number of CPU cores for the pairwise distance
+#'   computation (default \code{getOption("bluster.ncores", 1)}).  Values
+#'   > 1 use forked workers; degrades to serial on Windows.
 #'
 #' @return A \code{data.table} of edges with columns: \code{seq_id_1,
 #'   seq_id_2, cdr3_1, cdr3_2, distance, chain}.
@@ -35,13 +38,16 @@ bluster_global <- function(bcr_data,
                          length_diff = 1L,
                          chain = c("heavy", "light", "paired"),
                          scoring = c("blosum", "hamming"),
-                         subsample = 10000L) {
+                         subsample = 10000L,
+                         n_cores = getOption("bluster.ncores", 1L)) {
 
   chain <- match.arg(chain)
   scoring <- match.arg(scoring)
+  n_cores <- .resolve_ncores(n_cores)
 
   if (chain == "paired") {
-    return(.global_paired(bcr_data, max_dist, length_diff, scoring, subsample))
+    return(.global_paired(bcr_data, max_dist, length_diff, scoring,
+                          subsample, n_cores))
   }
 
   # Select the appropriate chain
@@ -70,7 +76,8 @@ bluster_global <- function(bcr_data,
 
   # Group by CDR3 length (± length_diff)
   seqs[, cdr3_len := nchar(cdr3)]
-  edges <- .compute_global_edges(seqs, max_dist, length_diff, scoring, chain)
+  edges <- .compute_global_edges(seqs, max_dist, length_diff, scoring,
+                                 chain, n_cores)
 
   message(sprintf("[blusteR] Found %d global similarity edges.", nrow(edges)))
   edges[]
@@ -81,7 +88,8 @@ bluster_global <- function(bcr_data,
 
 #' Compute edges between CDR3 sequences within distance threshold
 #' @keywords internal
-.compute_global_edges <- function(seqs, max_dist, length_diff, scoring, chain_label) {
+.compute_global_edges <- function(seqs, max_dist, length_diff, scoring,
+                                  chain_label, n_cores = 1L) {
 
   edges_list <- list()
   lengths <- sort(unique(seqs$cdr3_len))
@@ -95,7 +103,7 @@ bluster_global <- function(bcr_data,
     sub <- seqs[subset_idx]
 
     if (scoring == "blosum") {
-      edge_dt <- .blosum_edges(sub, max_dist, chain_label)
+      edge_dt <- .blosum_edges(sub, max_dist, chain_label, n_cores)
     } else {
       edge_dt <- .hamming_edges(sub, max_dist, chain_label)
     }
@@ -111,16 +119,17 @@ bluster_global <- function(bcr_data,
 
 #' Compute BLOSUM62-weighted distance between CDR3 pairs
 #' @keywords internal
-.blosum_edges <- function(seqs, max_dist, chain_label) {
+.blosum_edges <- function(seqs, max_dist, chain_label, n_cores = 1L) {
 
   blosum <- .get_blosum62()
   n <- nrow(seqs)
-  edges <- list()
+  if (n < 2) return(.empty_edges())
 
-  # Pairwise comparison
-  for (i in seq_len(n - 1)) {
+  # Each i compares against all j > i; parallelise over i.
+  compute_i <- function(i) {
     s1 <- strsplit(seqs$cdr3[i], "")[[1]]
     l1 <- length(s1)
+    rows <- list()
 
     for (j in (i + 1):n) {
       s2 <- strsplit(seqs$cdr3[j], "")[[1]]
@@ -134,7 +143,7 @@ bluster_global <- function(bcr_data,
       }
 
       if (d <= max_dist) {
-        edges[[length(edges) + 1]] <- data.table::data.table(
+        rows[[length(rows) + 1]] <- data.table::data.table(
           seq_id_1 = seqs$seq_id[i],
           seq_id_2 = seqs$seq_id[j],
           cdr3_1   = seqs$cdr3[i],
@@ -144,10 +153,16 @@ bluster_global <- function(bcr_data,
         )
       }
     }
+
+    if (length(rows) == 0) return(NULL)
+    data.table::rbindlist(rows)
   }
 
-  if (length(edges) == 0) return(.empty_edges())
-  data.table::rbindlist(edges)
+  res <- .bluster_lapply(seq_len(n - 1), compute_i, n_cores)
+  res <- res[!vapply(res, is.null, logical(1))]
+
+  if (length(res) == 0) return(.empty_edges())
+  data.table::rbindlist(res)
 }
 
 #' BLOSUM62 distance: count positions where BLOSUM62 score < 0
@@ -236,7 +251,8 @@ bluster_global <- function(bcr_data,
 
 #' Paired heavy+light chain global similarity
 #' @keywords internal
-.global_paired <- function(bcr_data, max_dist, length_diff, scoring, subsample) {
+.global_paired <- function(bcr_data, max_dist, length_diff, scoring,
+                           subsample, n_cores = 1L) {
 
   # Build paired table
   heavy <- bcr_data[chain_type == "heavy", .(
@@ -260,12 +276,12 @@ bluster_global <- function(bcr_data,
                   nrow(paired)))
 
   blosum <- .get_blosum62()
-  edges <- list()
   n <- nrow(paired)
 
-  for (i in seq_len(n - 1)) {
+  compute_i <- function(i) {
     h1 <- strsplit(paired$cdr3h[i], "")[[1]]
     l1 <- strsplit(paired$cdr3l[i], "")[[1]]
+    rows <- list()
 
     for (j in (i + 1):n) {
       h2 <- strsplit(paired$cdr3h[j], "")[[1]]
@@ -286,7 +302,7 @@ bluster_global <- function(bcr_data,
       d_combined <- 0.7 * dh + 0.3 * dl
 
       if (d_combined <= max_dist) {
-        edges[[length(edges) + 1]] <- data.table::data.table(
+        rows[[length(rows) + 1]] <- data.table::data.table(
           seq_id_1 = paired$cell_id[i],
           seq_id_2 = paired$cell_id[j],
           cdr3_1   = paste0(paired$cdr3h[i], "|", paired$cdr3l[i]),
@@ -296,10 +312,16 @@ bluster_global <- function(bcr_data,
         )
       }
     }
+
+    if (length(rows) == 0) return(NULL)
+    data.table::rbindlist(rows)
   }
 
-  if (length(edges) == 0) return(.empty_edges())
-  out <- data.table::rbindlist(edges)
+  res <- .bluster_lapply(seq_len(n - 1), compute_i, n_cores)
+  res <- res[!vapply(res, is.null, logical(1))]
+
+  if (length(res) == 0) return(.empty_edges())
+  out <- data.table::rbindlist(res)
   message(sprintf("[blusteR] Found %d paired global edges.", nrow(out)))
   out[]
 }

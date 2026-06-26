@@ -27,6 +27,9 @@
 #'   \code{"louvain"} for community detection.
 #' @param collapse_clones Logical; collapse cells from the same clone
 #'   before clustering to avoid inflation (default TRUE).
+#' @param n_cores Number of CPU cores for expanding motif edges (default
+#'   \code{getOption("bluster.ncores", 1)}).  Values > 1 use forked
+#'   workers; degrades to serial on Windows.
 #'
 #' @return A list of class \code{bluster_result}:
 #' \describe{
@@ -44,9 +47,11 @@ bluster_cluster <- function(bcr_data,
                           global_edges,
                           min_cluster_size = 3L,
                           clustering_method = c("components", "louvain"),
-                          collapse_clones = TRUE) {
+                          collapse_clones = TRUE,
+                          n_cores = getOption("bluster.ncores", 1L)) {
 
   clustering_method <- match.arg(clustering_method)
+  n_cores <- .resolve_ncores(n_cores)
 
   # --- 1. Collapse clonally related cells --------------------------------
   if (collapse_clones) {
@@ -54,7 +59,7 @@ bluster_cluster <- function(bcr_data,
   }
 
   # --- 2. Build combined edge list from motifs and global similarity -----
-  edges <- .build_combined_edges(motif_results, global_edges, bcr_data)
+  edges <- .build_combined_edges(motif_results, global_edges, bcr_data, n_cores)
 
   if (nrow(edges) == 0) {
     message("[blusteR] No edges found; cannot form clusters.")
@@ -206,27 +211,33 @@ bluster_network <- function(bluster_result) {
 
 #' Build combined edges from motifs and global results
 #' @keywords internal
-.build_combined_edges <- function(motif_results, global_edges, bcr_data) {
+.build_combined_edges <- function(motif_results, global_edges, bcr_data,
+                                  n_cores = 1L) {
 
   edge_list <- list()
 
   # Convert motif results to pairwise edges
   if (nrow(motif_results) > 0) {
-    for (i in seq_len(nrow(motif_results))) {
+    build_one <- function(i) {
       members <- motif_results$member_ids[[i]]
-      if (length(members) < 2) next
+      if (length(members) < 2) return(NULL)
 
       # Create edges between all pairs sharing this motif
       pairs <- utils::combn(members, 2)
-      motif_edges <- data.table::data.table(
+      data.table::data.table(
         seq_id_1  = pairs[1, ],
         seq_id_2  = pairs[2, ],
         weight    = 1.0,
         edge_type = "local_motif",
         motif     = motif_results$motif[i]
       )
-      edge_list[[length(edge_list) + 1]] <- motif_edges
     }
+
+    motif_edges_list <- .bluster_lapply(seq_len(nrow(motif_results)),
+                                        build_one, n_cores)
+    motif_edges_list <- motif_edges_list[
+      !vapply(motif_edges_list, is.null, logical(1))]
+    edge_list <- c(edge_list, motif_edges_list)
   }
 
   # Add global similarity edges

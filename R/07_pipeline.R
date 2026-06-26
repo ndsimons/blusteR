@@ -135,7 +135,8 @@ bluster <- function(bcr_data,
     bcr_data  = bcr_filtered,
     max_dist  = global_max_dist,
     chain     = global_chain,
-    scoring   = global_scoring
+    scoring   = global_scoring,
+    n_cores   = n_cores
   )
   message("")
 
@@ -147,7 +148,8 @@ bluster <- function(bcr_data,
     global_edges      = global,
     min_cluster_size  = min_cluster_size,
     clustering_method = clustering_method,
-    collapse_clones   = collapse_clones
+    collapse_clones   = collapse_clones,
+    n_cores           = n_cores
   )
   message("")
 
