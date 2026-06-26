@@ -29,6 +29,10 @@
 #' @param shm_degenerate Logical; also test degenerate motifs with one
 #'   position masked to its physico-chemical group (default TRUE).
 #' @param p_adjust_method Method for \code{p.adjust} (default \code{"BH"}).
+#' @param n_cores Number of CPU cores for the per-motif/per-sequence
+#'   enrichment loops (default \code{getOption("bluster.ncores", 1)}).
+#'   Values > 1 use forked workers (\code{parallel::mclapply}); on Windows
+#'   this degrades gracefully to serial execution.
 #'
 #' @return A \code{data.table} with columns: \code{motif, k, chain,
 #'   count_obs, count_ref, fold_enrichment, pvalue, pvalue_adj, member_ids}.
@@ -43,9 +47,11 @@ bluster_motifs <- function(bcr_data,
                          min_fold = .DEFAULT_MIN_FOLD,
                          p_cutoff = .DEFAULT_PVALUE,
                          shm_degenerate = TRUE,
-                         p_adjust_method = "BH") {
+                         p_adjust_method = "BH",
+                         n_cores = getOption("bluster.ncores", 1L)) {
 
   chain <- match.arg(chain)
+  n_cores <- .resolve_ncores(n_cores)
 
   # Build reference if not provided
   if (is.null(reference)) {
@@ -108,7 +114,8 @@ bluster_motifs <- function(bcr_data,
         bg          = bg,
         n_input     = nrow(seqs),
         k           = k,
-        chain_label = ch
+        chain_label = ch,
+        n_cores     = n_cores
       )
 
       all_results[[paste0(ch, "_k", k)]] <- results
@@ -117,8 +124,10 @@ bluster_motifs <- function(bcr_data,
       if (shm_degenerate) {
         degen_motifs <- .generate_degenerate_motifs(candidates, k)
         if (length(degen_motifs) > 0) {
-          degen_map <- .extract_degenerate_kmers_per_seq(seqs$cdr3, degen_motifs)
-          degen_counts <- .count_degenerate_motifs(degen_motifs, degen_map)
+          degen_map <- .extract_degenerate_kmers_per_seq(seqs$cdr3, degen_motifs,
+                                                         n_cores = n_cores)
+          degen_counts <- .count_degenerate_motifs(degen_motifs, degen_map,
+                                                   n_cores = n_cores)
           degen_cands <- names(degen_counts)[degen_counts >= min_freq &
                                              degen_counts <= max_count]
           if (length(degen_cands) > 0) {
@@ -129,7 +138,8 @@ bluster_motifs <- function(bcr_data,
               bg          = bg,
               n_input     = nrow(seqs),
               k           = k,
-              chain_label = ch
+              chain_label = ch,
+              n_cores     = n_cores
             )
             all_results[[paste0(ch, "_k", k, "_degen")]] <- degen_results
           }
@@ -167,6 +177,22 @@ bluster_motifs <- function(bcr_data,
 
 # ---- internal motif helpers ------------------------------------------
 
+#' lapply, parallelised across cores when n_cores > 1
+#'
+#' Uses forked workers via \code{parallel::mclapply} on Unix/macOS; on
+#' Windows \code{mclapply} runs serially, so this degrades gracefully.
+#' @keywords internal
+.bluster_lapply <- function(x, FUN, n_cores = 1L) {
+  if (n_cores <= 1L) return(lapply(x, FUN))
+  res <- parallel::mclapply(x, FUN, mc.cores = n_cores)
+  failed <- vapply(res, inherits, logical(1), what = "try-error")
+  if (any(failed)) {
+    stop("parallel motif computation failed: ",
+         conditionMessage(attr(res[[which(failed)[1]]], "condition")))
+  }
+  res
+}
+
 #' Extract all k-mers from each sequence
 #' @keywords internal
 .extract_kmers_per_seq <- function(cdr3_vec, k) {
@@ -181,20 +207,9 @@ bluster_motifs <- function(bcr_data,
 #' Test motif enrichment against background via Fisher / binomial test
 #' @keywords internal
 .test_motif_enrichment <- function(candidates, kmer_map, seq_ids,
-                                   bg, n_input, k, chain_label) {
+                                   bg, n_input, k, chain_label, n_cores = 1L) {
 
-  results <- vector("list", length(candidates))
-
-  pb <- .bluster_progress_new(length(candidates),
-                              getOption("bluster.verbose", TRUE),
-                              label = sprintf(
-                                "[blusteR] Testing %d exact k=%d motifs (%s)...",
-                                length(candidates), k, chain_label))
-  pb_i <- 0L
-
-  for (i in seq_along(candidates)) {
-    motif <- candidates[i]
-
+  test_one <- function(motif) {
     # Count input sequences containing this motif
     has_motif <- vapply(kmer_map, function(x) motif %in% x, logical(1))
     n_obs <- sum(has_motif)
@@ -214,7 +229,7 @@ bluster_motifs <- function(bcr_data,
 
     fold <- freq_obs / max(freq_ref, 1e-10)
 
-    results[[i]] <- data.table::data.table(
+    data.table::data.table(
       motif           = motif,
       k               = k,
       chain           = chain_label,
@@ -226,11 +241,26 @@ bluster_motifs <- function(bcr_data,
       pvalue_adj      = NA_real_,  # filled later
       member_ids      = list(seq_ids[has_motif])
     )
-
-    pb_i <- .bluster_progress_tick(pb, pb_i)
   }
 
-  .bluster_progress_close(pb)
+  label <- sprintf("[blusteR] Testing %d exact k=%d motifs (%s)%s...",
+                   length(candidates), k, chain_label,
+                   if (n_cores > 1L) sprintf(" on %d cores", n_cores) else "")
+
+  if (n_cores > 1L) {
+    if (isTRUE(getOption("bluster.verbose", TRUE))) message(label)
+    results <- .bluster_lapply(candidates, test_one, n_cores)
+  } else {
+    pb <- .bluster_progress_new(length(candidates),
+                                getOption("bluster.verbose", TRUE), label = label)
+    pb_i <- 0L
+    results <- lapply(candidates, function(m) {
+      r <- test_one(m)
+      pb_i <<- .bluster_progress_tick(pb, pb_i)
+      r
+    })
+    .bluster_progress_close(pb)
+  }
 
   data.table::rbindlist(results)
 }
@@ -267,61 +297,77 @@ bluster_motifs <- function(bcr_data,
 
 #' Extract degenerate motif matches per sequence
 #' @keywords internal
-.extract_degenerate_kmers_per_seq <- function(cdr3_vec, degen_motifs) {
+.extract_degenerate_kmers_per_seq <- function(cdr3_vec, degen_motifs,
+                                              n_cores = 1L) {
 
-  pb <- .bluster_progress_new(
-    length(cdr3_vec), getOption("bluster.verbose", TRUE),
-    label = sprintf("[blusteR] Scanning %d sequences for %d degenerate motifs...",
-                    length(cdr3_vec), length(degen_motifs)))
-  pb_i <- 0L
-
-  out <- lapply(cdr3_vec, function(s) {
+  scan_one <- function(s) {
     matches <- vapply(degen_motifs, function(dm) {
       grepl(dm, s)
     }, logical(1))
-    pb_i <<- .bluster_progress_tick(pb, pb_i)
     degen_motifs[matches]
-  })
+  }
 
+  label <- sprintf(
+    "[blusteR] Scanning %d sequences for %d degenerate motifs%s...",
+    length(cdr3_vec), length(degen_motifs),
+    if (n_cores > 1L) sprintf(" on %d cores", n_cores) else "")
+
+  if (n_cores > 1L) {
+    if (isTRUE(getOption("bluster.verbose", TRUE))) message(label)
+    return(.bluster_lapply(cdr3_vec, scan_one, n_cores))
+  }
+
+  pb <- .bluster_progress_new(length(cdr3_vec),
+                              getOption("bluster.verbose", TRUE), label = label)
+  pb_i <- 0L
+  out <- lapply(cdr3_vec, function(s) {
+    r <- scan_one(s)
+    pb_i <<- .bluster_progress_tick(pb, pb_i)
+    r
+  })
   .bluster_progress_close(pb)
   out
 }
 
 #' Count input sequences matching each degenerate motif
 #' @keywords internal
-.count_degenerate_motifs <- function(degen_motifs, degen_map) {
+.count_degenerate_motifs <- function(degen_motifs, degen_map, n_cores = 1L) {
 
-  pb <- .bluster_progress_new(
-    length(degen_motifs), getOption("bluster.verbose", TRUE),
-    label = sprintf("[blusteR] Counting matches for %d degenerate motifs...",
-                    length(degen_motifs)))
-  pb_i <- 0L
+  count_one <- function(dm) sum(vapply(degen_map, function(x) dm %in% x,
+                                       logical(1)))
 
-  counts <- vapply(degen_motifs, function(dm) {
-    n <- sum(vapply(degen_map, function(x) dm %in% x, logical(1)))
-    pb_i <<- .bluster_progress_tick(pb, pb_i)
-    n
-  }, integer(1))
+  label <- sprintf(
+    "[blusteR] Counting matches for %d degenerate motifs%s...",
+    length(degen_motifs),
+    if (n_cores > 1L) sprintf(" on %d cores", n_cores) else "")
 
-  .bluster_progress_close(pb)
+  if (n_cores > 1L) {
+    if (isTRUE(getOption("bluster.verbose", TRUE))) message(label)
+    counts <- unlist(.bluster_lapply(degen_motifs, count_one, n_cores),
+                     use.names = FALSE)
+  } else {
+    pb <- .bluster_progress_new(length(degen_motifs),
+                                getOption("bluster.verbose", TRUE), label = label)
+    pb_i <- 0L
+    counts <- vapply(degen_motifs, function(dm) {
+      n <- count_one(dm)
+      pb_i <<- .bluster_progress_tick(pb, pb_i)
+      n
+    }, integer(1))
+    .bluster_progress_close(pb)
+  }
+
+  names(counts) <- degen_motifs
   counts
 }
 
 #' Test degenerate motif enrichment
 #' @keywords internal
 .test_degenerate_enrichment <- function(candidates, degen_map, seq_ids,
-                                        bg, n_input, k, chain_label) {
+                                        bg, n_input, k, chain_label,
+                                        n_cores = 1L) {
 
-  results <- vector("list", length(candidates))
-
-  pb <- .bluster_progress_new(
-    length(candidates), getOption("bluster.verbose", TRUE),
-    label = sprintf("[blusteR] Testing %d degenerate k=%d motifs (%s)...",
-                    length(candidates), k, chain_label))
-  pb_i <- 0L
-
-  for (i in seq_along(candidates)) {
-    motif <- candidates[i]
+  test_one <- function(motif) {
     has_motif <- vapply(degen_map, function(x) motif %in% x, logical(1))
     n_obs <- sum(has_motif)
     freq_obs <- n_obs / n_input
@@ -341,7 +387,7 @@ bluster_motifs <- function(bcr_data,
 
     fold <- freq_obs / max(freq_ref, 1e-10)
 
-    results[[i]] <- data.table::data.table(
+    data.table::data.table(
       motif           = motif,
       k               = k,
       chain           = chain_label,
@@ -353,11 +399,26 @@ bluster_motifs <- function(bcr_data,
       pvalue_adj      = NA_real_,
       member_ids      = list(seq_ids[has_motif])
     )
-
-    pb_i <- .bluster_progress_tick(pb, pb_i)
   }
 
-  .bluster_progress_close(pb)
+  label <- sprintf("[blusteR] Testing %d degenerate k=%d motifs (%s)%s...",
+                   length(candidates), k, chain_label,
+                   if (n_cores > 1L) sprintf(" on %d cores", n_cores) else "")
+
+  if (n_cores > 1L) {
+    if (isTRUE(getOption("bluster.verbose", TRUE))) message(label)
+    results <- .bluster_lapply(candidates, test_one, n_cores)
+  } else {
+    pb <- .bluster_progress_new(length(candidates),
+                                getOption("bluster.verbose", TRUE), label = label)
+    pb_i <- 0L
+    results <- lapply(candidates, function(m) {
+      r <- test_one(m)
+      pb_i <<- .bluster_progress_tick(pb, pb_i)
+      r
+    })
+    .bluster_progress_close(pb)
+  }
 
   data.table::rbindlist(results)
 }

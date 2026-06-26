@@ -27,6 +27,9 @@
 #' @param collapse_clones Collapse clonal relatives first (default TRUE).
 #' @param annotate Logical; annotate against IEDB/SAbDab (default TRUE).
 #' @param species \code{"human"} or \code{"mouse"}.
+#' @param n_cores Number of CPU cores for the parallelisable motif-discovery
+#'   step (default \code{getOption("bluster.ncores", 1)}).  Values > 1 use
+#'   forked workers; on Windows this degrades to serial execution.
 #' @param seed Optional integer; if supplied, sets the random seed so the
 #'   stochastic steps (Louvain community detection and global-similarity
 #'   subsampling) are reproducible.  Default \code{NULL} leaves the RNG
@@ -72,6 +75,7 @@ bluster <- function(bcr_data,
                   collapse_clones = TRUE,
                   annotate = TRUE,
                   species = c("human", "mouse"),
+                  n_cores = getOption("bluster.ncores", 1L),
                   seed = NULL,
                   verbose = TRUE) {
 
@@ -119,7 +123,8 @@ bluster <- function(bcr_data,
     min_freq     = motif_min_freq,
     max_freq     = motif_max_freq,
     min_fold     = motif_min_fold,
-    p_cutoff     = motif_p_cutoff
+    p_cutoff     = motif_p_cutoff,
+    n_cores      = n_cores
   )
   message("")
 
