@@ -27,6 +27,10 @@
 #' @param collapse_clones Collapse clonal relatives first (default TRUE).
 #' @param annotate Logical; annotate against IEDB/SAbDab (default TRUE).
 #' @param species \code{"human"} or \code{"mouse"}.
+#' @param seed Optional integer; if supplied, sets the random seed so the
+#'   stochastic steps (Louvain community detection and global-similarity
+#'   subsampling) are reproducible.  Default \code{NULL} leaves the RNG
+#'   state untouched.
 #' @param verbose Print progress messages (default TRUE).
 #'
 #' @return A \code{bluster_result} object.
@@ -68,12 +72,15 @@ bluster <- function(bcr_data,
                   collapse_clones = TRUE,
                   annotate = TRUE,
                   species = c("human", "mouse"),
+                  seed = NULL,
                   verbose = TRUE) {
 
   chain <- match.arg(chain)
   global_scoring <- match.arg(global_scoring)
   clustering_method <- match.arg(clustering_method)
   species <- match.arg(species)
+
+  if (!is.null(seed)) set.seed(seed)
 
   if (!verbose) {
     old_opts <- options(bluster.verbose = FALSE)
