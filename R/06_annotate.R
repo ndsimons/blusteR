@@ -76,8 +76,12 @@ annotate_epitopes <- function(bluster_result,
     cl_cdr3h <- cl_cdr3h[!is.na(cl_cdr3h)]
 
     for (cdr3 in cl_cdr3h) {
-      # Exact match
-      exact <- known[cdr3h == cdr3]
+      cdr3_canon <- .canon_cdr3(cdr3)
+      if (is.na(cdr3_canon) || nchar(cdr3_canon) == 0) next
+      s1 <- strsplit(cdr3_canon, "")[[1]]
+
+      # Exact match (boundary-normalised)
+      exact <- known[cdr3h_canon == cdr3_canon]
       if (nrow(exact) > 0) {
         for (r in seq_len(nrow(exact))) {
           annotations[[length(annotations) + 1]] <- data.table::data.table(
@@ -95,14 +99,13 @@ annotate_epitopes <- function(bluster_result,
         next
       }
 
-      # Near match
-      s1 <- strsplit(cdr3, "")[[1]]
+      # Near match (boundary-normalised)
       for (r in seq_len(nrow(known))) {
-        ref_cdr3 <- known$cdr3h[r]
-        if (is.na(ref_cdr3) || nchar(ref_cdr3) == 0) next
-        if (abs(nchar(cdr3) - nchar(ref_cdr3)) > 1) next
+        ref_canon <- known$cdr3h_canon[r]
+        if (is.na(ref_canon) || nchar(ref_canon) == 0) next
+        if (abs(nchar(cdr3_canon) - nchar(ref_canon)) > 1) next
 
-        s2 <- strsplit(ref_cdr3, "")[[1]]
+        s2 <- strsplit(ref_canon, "")[[1]]
         d <- if (length(s1) == length(s2)) {
           .blosum_distance(s1, s2, blosum)
         } else {
@@ -113,7 +116,7 @@ annotate_epitopes <- function(bluster_result,
           annotations[[length(annotations) + 1]] <- data.table::data.table(
             cluster_id = cl_id,
             query_cdr3 = cdr3,
-            match_cdr3 = ref_cdr3,
+            match_cdr3 = known$cdr3h[r],
             match_type = "near",
             distance   = d,
             antigen    = known$antigen[r],
@@ -211,9 +214,38 @@ score_clusters <- function(bluster_result, bcr_data) {
     return(data.table::data.table(
       cdr3h = character(0), cdr3l = character(0),
       antigen = character(0), organism = character(0),
-      source = character(0), pdb_id = character(0)
+      source = character(0), pdb_id = character(0),
+      cdr3h_canon = character(0)
     ))
   }
 
-  data.table::rbindlist(rows, fill = TRUE)
+  tab <- data.table::rbindlist(rows, fill = TRUE)
+
+  # Some sources store several CDR3H joined by ";"; expand to one per row
+  tab <- tab[!is.na(cdr3h) & nchar(cdr3h) > 0]
+  if (nrow(tab) > 0 && any(grepl(";", tab$cdr3h, fixed = TRUE))) {
+    tab <- tab[, .(cdr3h = trimws(unlist(strsplit(cdr3h, ";", fixed = TRUE)))),
+               by = setdiff(names(tab), "cdr3h")]
+    tab <- tab[nchar(cdr3h) > 0]
+  }
+
+  # Boundary-normalised CDR3H so input of any convention (with/without the
+  # conserved flanking C...W) matches the reference loop residues.
+  tab[, cdr3h_canon := .canon_cdr3(cdr3h)]
+  tab[!is.na(cdr3h_canon) & nchar(cdr3h_canon) > 0]
+}
+
+#' Canonicalise a CDR3 amino-acid sequence for cross-source matching
+#'
+#' Databases differ in whether they include the conserved residues that
+#' flank the CDR3 loop (a Cys before, a Trp or Phe after).  Stripping a
+#' single leading \code{C} and trailing \code{W}/\code{F} lets input
+#' (e.g. 10X \code{"CARDRW"}) and IEDB (\code{"ARDR"}) conventions be
+#' compared on the same loop residues.
+#' @keywords internal
+.canon_cdr3 <- function(x) {
+  x <- toupper(trimws(x))
+  x <- sub("^C", "", x)
+  x <- sub("[WF]$", "", x)
+  x
 }
